@@ -1,0 +1,34 @@
+import db from "../db.js";
+import { getOracle, getToken, getSale, getAdminAddress } from "../services/blockchain.js";
+import { ethers } from "ethers";
+
+export function startEventListeners() {
+  const oracle = getOracle();
+  const token = getToken();
+  const sale = getSale();
+
+  if (oracle) {
+    oracle.on("PriceUpdated", (newPrice) => {
+      console.log(`[EVENT] PriceUpdated: ${newPrice.toString()}`);
+    });
+  }
+
+  if (token) {
+    token.on("Transfer", (from, to, amount) => {
+      const decimals = Number(process.env.TOKEN_DECIMALS);
+      console.log(`[EVENT] Transfer: ${from} -> ${to} | ${ethers.formatUnits(amount, decimals)} MERT`);
+    });
+  }
+
+  if (sale) {
+    sale.on("TokensPurchased", (buyer, receiver, trbPaid, tokensBought, price) => {
+      console.log(`[EVENT] TokensPurchased: ${buyer} -> ${receiver} | ${tokensBought.toString()} tokens`);
+    });
+
+    sale.on("TokensSold", (seller, receiver, tokensSold, trbReceived, price) => {
+      console.log(`[EVENT] TokensSold: ${seller} -> ${receiver} | ${tokensSold.toString()} tokens`);
+    });
+  }
+
+  console.log("[EVENTS] Listener'lar başlatıldı");
+}

@@ -1,0 +1,40 @@
+import Database from "better-sqlite3";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const db = new Database(path.join(__dirname, "..", "data.db"));
+
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    wallet_address TEXT UNIQUE,
+    try_balance REAL DEFAULT 0,
+    is_admin INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('buy','sell')),
+    token_amount TEXT NOT NULL,
+    try_amount REAL NOT NULL,
+    price TEXT NOT NULL,
+    tx_hash TEXT,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending','completed','failed')),
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+  CREATE INDEX IF NOT EXISTS idx_users_wallet ON users(wallet_address);
+`);
+
+export default db;
