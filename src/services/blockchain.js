@@ -1,121 +1,1 @@
-import { ethers } from "ethers";
-
-const ORACLE_ABI = [
-  "function getPrice() view returns (uint256)",
-  "function setPrice(uint256 newPrice)",
-  "function registerWallet(address wallet)",
-  "function isWalletRegistered(address wallet) view returns (bool)",
-  "function grantControlRole(address account)",
-  "event PriceUpdated(uint256 newPrice)"
-];
-
-const TOKEN_ABI = [
-  "function balanceOf(address account) view returns (uint256)",
-  "function transfer(address to, uint256 amount) returns (bool)",
-  "function transferFrom(address from, address to, uint256 amount) returns (bool)",
-  "function mint(address to, uint256 amount)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-  "function totalSupply() view returns (uint256)",
-  "function transferOnlyKYC() view returns (bool)",
-  "function setTransferOnlyKYC(bool _enabled)",
-  "function setPriceOracle(address _priceOracle)",
-  "function registerWallet()",
-  "event Transfer(address indexed from, address indexed to, uint256 value)"
-];
-
-const SALE_ABI = [
-  "function buy(uint256 trbAmount, address receiver) returns (uint256)",
-  "function sell(uint256 tokenAmount, address receiver) returns (uint256)",
-  "function previewBuy(uint256 trbAmount) view returns (uint256)",
-  "function previewSell(uint256 tokenAmount) view returns (uint256)",
-  "function setOracle(address oracle_)",
-  "event TokensPurchased(address indexed buyer, address indexed receiver, uint256 trbPaid, uint256 tokensBought, uint256 price)",
-  "event TokensSold(address indexed seller, address indexed receiver, uint256 tokensSold, uint256 trbReceived, uint256 price)"
-];
-
-let provider, adminWallet, oracle, token, sale;
-
-export function initBlockchain() {
-  provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-  adminWallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
-
-  if (process.env.ORACLE_ADDRESS) {
-    oracle = new ethers.Contract(process.env.ORACLE_ADDRESS, ORACLE_ABI, adminWallet);
-  }
-  if (process.env.TOKEN_ADDRESS) {
-    token = new ethers.Contract(process.env.TOKEN_ADDRESS, TOKEN_ABI, adminWallet);
-  }
-  if (process.env.SALE_ADDRESS) {
-    sale = new ethers.Contract(process.env.SALE_ADDRESS, SALE_ABI, adminWallet);
-  }
-
-  return { provider, adminWallet, oracle, token, sale };
-}
-
-export function getProvider() { return provider; }
-export function getAdminWallet() { return adminWallet; }
-export function getOracle() { return oracle; }
-export function getToken() { return token; }
-export function getSale() { return sale; }
-export function getAdminAddress() { return adminWallet.address; }
-
-export async function getPrice() {
-  const raw = await oracle.getPrice();
-  const decimals = Number(process.env.PRICE_DECIMALS);
-  return {
-    raw: raw.toString(),
-    formatted: Number(raw) / 10 ** decimals
-  };
-}
-
-export async function getTokenBalance(address) {
-  const raw = await token.balanceOf(address);
-  const decimals = Number(process.env.TOKEN_DECIMALS);
-  return {
-    raw: raw.toString(),
-    formatted: ethers.formatUnits(raw, decimals)
-  };
-}
-
-export async function sendTokensToUser(toAddress, amount) {
-  const decimals = Number(process.env.TOKEN_DECIMALS);
-  const parsedAmount = ethers.parseUnits(amount.toString(), decimals);
-  const tx = await token.transfer(toAddress, parsedAmount);
-  const receipt = await tx.wait();
-  return { txHash: receipt.hash, amount: parsedAmount.toString() };
-}
-
-export async function verifyTransferToAdmin(txHash) {
-  const receipt = await provider.getTransactionReceipt(txHash);
-  if (!receipt || receipt.status !== 1) return null;
-
-  const iface = new ethers.Interface(TOKEN_ABI);
-  const adminAddr = adminWallet.address.toLowerCase();
-
-  for (const log of receipt.logs) {
-    try {
-      const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-      if (parsed.name === "Transfer" && parsed.args.to.toLowerCase() === adminAddr) {
-        return {
-          from: parsed.args.from,
-          to: parsed.args.to,
-          amount: parsed.args.value.toString()
-        };
-      }
-    } catch {}
-  }
-  return null;
-}
-
-export async function calculateTryAmount(tokenAmountRaw) {
-  const priceData = await getPrice();
-  const decimals = Number(process.env.TOKEN_DECIMALS);
-  const tokenAmount = Number(tokenAmountRaw) / 10 ** decimals;
-  return tokenAmount * priceData.formatted;
-}
-
-export function verifySignature(message, signature) {
-  return ethers.verifyMessage(message, signature);
-}
+import { ethers } from "ethers";const ORACLE_ABI = [  "function getPrice() view returns (uint256)",  "function setPrice(uint256 newPrice)",  "function registerWallet(address wallet)",  "function isWalletRegistered(address wallet) view returns (bool)",  "function grantControlRole(address account)",  "event PriceUpdated(uint256 newPrice)"];const TOKEN_ABI = [  "function balanceOf(address account) view returns (uint256)",  "function transfer(address to, uint256 amount) returns (bool)",  "function transferFrom(address from, address to, uint256 amount) returns (bool)",  "function mint(address to, uint256 amount)",  "function approve(address spender, uint256 amount) returns (bool)",  "function allowance(address owner, address spender) view returns (uint256)",  "function decimals() view returns (uint8)",  "function totalSupply() view returns (uint256)",  "function transferOnlyKYC() view returns (bool)",  "function setTransferOnlyKYC(bool _enabled)",  "function setPriceOracle(address _priceOracle)",  "function registerWallet()",  "event Transfer(address indexed from, address indexed to, uint256 value)"];const SALE_ABI = [  "function buy(uint256 trbAmount, address receiver) returns (uint256)",  "function sell(uint256 tokenAmount, address receiver) returns (uint256)",  "function previewBuy(uint256 trbAmount) view returns (uint256)",  "function previewSell(uint256 tokenAmount) view returns (uint256)",  "function setOracle(address oracle_)",  "event TokensPurchased(address indexed buyer, address indexed receiver, uint256 trbPaid, uint256 tokensBought, uint256 price)",  "event TokensSold(address indexed seller, address indexed receiver, uint256 tokensSold, uint256 trbReceived, uint256 price)"];let provider, adminWallet, poolWallet, oracle, token, poolToken, sale;export function initBlockchain() {  provider = new ethers.JsonRpcProvider(process.env.RPC_URL);  adminWallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);  if (process.env.POOL_PRIVATE_KEY) {    poolWallet = new ethers.Wallet(process.env.POOL_PRIVATE_KEY, provider);  } else {    poolWallet = adminWallet;   }  if (process.env.ORACLE_ADDRESS) {    oracle = new ethers.Contract(process.env.ORACLE_ADDRESS, ORACLE_ABI, adminWallet);  }  if (process.env.TOKEN_ADDRESS) {    token = new ethers.Contract(process.env.TOKEN_ADDRESS, TOKEN_ABI, adminWallet);    poolToken = new ethers.Contract(process.env.TOKEN_ADDRESS, TOKEN_ABI, poolWallet);  }  if (process.env.SALE_ADDRESS) {    sale = new ethers.Contract(process.env.SALE_ADDRESS, SALE_ABI, adminWallet);  }  console.log(`[BLOCKCHAIN] Admin : ${adminWallet.address}`);  console.log(`[BLOCKCHAIN] Pool  : ${poolWallet.address}`);  return { provider, adminWallet, poolWallet, oracle, token, poolToken, sale };}export function getProvider() { return provider; }export function getAdminWallet() { return adminWallet; }export function getPoolWallet() { return poolWallet; }export function getOracle() { return oracle; }export function getToken() { return token; }export function getPoolToken() { return poolToken; }export function getSale() { return sale; }export function getAdminAddress() { return adminWallet.address; }export function getPoolAddress() { return poolWallet.address; }export async function getPrice() {  const raw = await oracle.getPrice();  const decimals = Number(process.env.PRICE_DECIMALS);  return {    raw: raw.toString(),    formatted: Number(raw) / 10 ** decimals  };}export async function getTokenBalance(address) {  const raw = await token.balanceOf(address);  const decimals = Number(process.env.TOKEN_DECIMALS);  return {    raw: raw.toString(),    formatted: ethers.formatUnits(raw, decimals)  };}export async function sendTokensToUser(toAddress, amount) {  const decimals = Number(process.env.TOKEN_DECIMALS);  const parsedAmount = ethers.parseUnits(amount.toString(), decimals);  const tx = await poolToken.transfer(toAddress, parsedAmount);  const receipt = await tx.wait();  console.log(`[TRANSFER] ${amount} MERT pool\u2192${toAddress} | tx: ${receipt.hash}`);  return { txHash: receipt.hash, amount: parsedAmount.toString() };}export async function verifyTransferToAdmin(txHash) {  const receipt = await provider.getTransactionReceipt(txHash);  if (!receipt || receipt.status !== 1) return null;  const iface = new ethers.Interface(TOKEN_ABI);  const poolAddr = poolWallet.address.toLowerCase();  for (const log of receipt.logs) {    try {      const parsed = iface.parseLog({ topics: log.topics, data: log.data });      if (parsed.name === "Transfer" && parsed.args.to.toLowerCase() === poolAddr) {        return {          from: parsed.args.from,          to: parsed.args.to,          amount: parsed.args.value.toString()        };      }    } catch {}  }  return null;}export async function calculateTryAmount(tokenAmountRaw) {  const priceData = await getPrice();  const decimals = Number(process.env.TOKEN_DECIMALS);  const tokenAmount = Number(tokenAmountRaw) / 10 ** decimals;  return tokenAmount * priceData.formatted;}export function verifySignature(message, signature) {  return ethers.verifyMessage(message, signature);}

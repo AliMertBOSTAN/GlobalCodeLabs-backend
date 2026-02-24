@@ -1,74 +1,1 @@
-import { Router } from "express";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import db from "../db.js";
-
-const router = Router();
-
-router.post("/register", (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: "username ve password gerekli" });
-  }
-
-  const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
-  if (existing) {
-    return res.status(409).json({ error: "Bu kullanıcı zaten var" });
-  }
-
-  const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)").run(username, hash);
-
-  const token = jwt.sign(
-    { id: result.lastInsertRowid, username, is_admin: 0 },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-  res.status(201).json({ token, user: { id: result.lastInsertRowid, username } });
-});
-
-router.post("/login", (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: "username ve password gerekli" });
-  }
-
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: "Geçersiz kimlik bilgileri" });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, username: user.username, is_admin: user.is_admin },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-  res.json({
-    token,
-    user: {
-      id: user.id,
-      username: user.username,
-      wallet_address: user.wallet_address,
-      try_balance: user.try_balance,
-      is_admin: user.is_admin
-    }
-  });
-});
-
-router.get("/me", (req, res) => {
-  const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "Token gerekli" });
-
-  try {
-    const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET);
-    const user = db.prepare("SELECT id, username, wallet_address, try_balance, is_admin, created_at FROM users WHERE id = ?").get(decoded.id);
-    if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
-    res.json(user);
-  } catch {
-    res.status(401).json({ error: "Geçersiz token" });
-  }
-});
-
-export default router;
+import { Router } from "express";import bcrypt from "bcryptjs";import jwt from "jsonwebtoken";import db from "../db.js";import { verifySignature, getOracle } from "../services/blockchain.js";const router = Router();router.post("/register", (req, res) => {  const { username, password } = req.body;  if (!username || !password) {    return res.status(400).json({ error: "username ve password gerekli" });  }  const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);  if (existing) {    return res.status(409).json({ error: "Bu kullanıcı zaten var" });  }  const hash = bcrypt.hashSync(password, 10);  const result = db.prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)").run(username, hash);  const token = jwt.sign(    { id: result.lastInsertRowid, username, is_admin: 0 },    process.env.JWT_SECRET,    { expiresIn: "7d" }  );  res.status(201).json({ token, user: { id: result.lastInsertRowid, username } });});router.post("/login", (req, res) => {  const { username, password } = req.body;  if (!username || !password) {    return res.status(400).json({ error: "username ve password gerekli" });  }  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);  if (!user || !bcrypt.compareSync(password, user.password_hash)) {    return res.status(401).json({ error: "Geçersiz kimlik bilgileri" });  }  const token = jwt.sign(    { id: user.id, username: user.username, is_admin: user.is_admin },    process.env.JWT_SECRET,    { expiresIn: "7d" }  );  res.json({    token,    user: {      id: user.id,      username: user.username,      wallet_address: user.wallet_address,      try_balance: user.try_balance,      is_admin: user.is_admin    }  });});router.get("/me", (req, res) => {  const header = req.headers.authorization;  if (!header) return res.status(401).json({ error: "Token gerekli" });  try {    const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET);    const user = db.prepare("SELECT id, username, wallet_address, try_balance, is_admin, created_at FROM users WHERE id = ?").get(decoded.id);    if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });    res.json(user);  } catch {    res.status(401).json({ error: "Geçersiz token" });  }});router.post("/wallet", async (req, res) => {  const { address, message, signature } = req.body;  if (!address || !message || !signature) {    return res.status(400).json({ error: "address, message ve signature gerekli" });  }  try {    const recovered = verifySignature(message, signature);    if (recovered.toLowerCase() !== address.toLowerCase()) {      return res.status(400).json({ error: "İmza doğrulanamadı" });    }    const addrLower = address.toLowerCase();    let user = db.prepare("SELECT * FROM users WHERE wallet_address = ?").get(addrLower);    if (!user) {      const envAdmin = (process.env.ADMIN_ADDRESS || '').toLowerCase();      if (envAdmin && addrLower === envAdmin) {        const adminUser = db.prepare("SELECT * FROM users WHERE is_admin = 1 AND (wallet_address IS NULL OR wallet_address = '')").get();        if (adminUser) {          db.prepare("UPDATE users SET wallet_address = ? WHERE id = ?").run(addrLower, adminUser.id);          user = db.prepare("SELECT * FROM users WHERE id = ?").get(adminUser.id);        }      }    }    if (!user) {      const username = `wallet_${addrLower.slice(2, 10)}`;      const hash = bcrypt.hashSync(Math.random().toString(36), 10);      const result = db.prepare(        "INSERT INTO users (username, password_hash, wallet_address) VALUES (?, ?, ?)"      ).run(username, hash, addrLower);      user = db.prepare("SELECT * FROM users WHERE id = ?").get(result.lastInsertRowid);      try {        const oracle = getOracle();        if (oracle) {          const isRegistered = await oracle.isWalletRegistered(address);          if (!isRegistered) {            const tx = await oracle.registerWallet(address);            await tx.wait();          }        }      } catch (e) {        console.warn("[WALLET AUTH] KYC kaydı yapılamadı:", e.message);      }    }    const token = jwt.sign(      { id: user.id, username: user.username, is_admin: user.is_admin },      process.env.JWT_SECRET,      { expiresIn: "7d" }    );    res.json({      token,      user: {        id: user.id,        username: user.username,        wallet_address: user.wallet_address,        try_balance: user.try_balance,        is_admin: user.is_admin      }    });  } catch (err) {    console.error("[WALLET AUTH]", err);    res.status(500).json({ error: "Cüzdan girişi hatası" });  }});export default router;

@@ -1,155 +1,1 @@
-import { Router } from "express";
-import db from "../db.js";
-import { authMiddleware, adminMiddleware } from "../middleware/auth.js";
-import { getPrice, getOracle, getToken, getTokenBalance, getAdminAddress } from "../services/blockchain.js";
-import { ethers } from "ethers";
-
-const router = Router();
-
-router.use(authMiddleware, adminMiddleware);
-
-router.post("/set-price", async (req, res) => {
-  const { price } = req.body;
-  if (!price || Number(price) <= 0) {
-    return res.status(400).json({ error: "Geçerli bir fiyat gerekli" });
-  }
-
-  try {
-    const oracle = getOracle();
-    const decimals = Number(process.env.PRICE_DECIMALS);
-    const priceValue = BigInt(Math.round(Number(price) * 10 ** decimals));
-    const tx = await oracle.setPrice(priceValue);
-    await tx.wait();
-    res.json({ message: "Fiyat güncellendi", price: Number(price) });
-  } catch (err) {
-    res.status(500).json({ error: "Fiyat güncelleme hatası" });
-  }
-});
-
-router.post("/mint", async (req, res) => {
-  const { to, amount } = req.body;
-  if (!to || !amount) {
-    return res.status(400).json({ error: "to ve amount gerekli" });
-  }
-
-  try {
-    const token = getToken();
-    const decimals = Number(process.env.TOKEN_DECIMALS);
-    const tx = await token.mint(to, ethers.parseUnits(amount.toString(), decimals));
-    const receipt = await tx.wait();
-    res.json({ message: "Token basıldı", tx_hash: receipt.hash, to, amount });
-  } catch (err) {
-    res.status(500).json({ error: "Mint hatası" });
-  }
-});
-
-router.post("/kyc/register", async (req, res) => {
-  const { address } = req.body;
-  if (!address) {
-    return res.status(400).json({ error: "address gerekli" });
-  }
-
-  try {
-    const oracle = getOracle();
-    const tx = await oracle.registerWallet(address);
-    await tx.wait();
-    res.json({ message: "KYC kaydı yapıldı", address });
-  } catch (err) {
-    res.status(500).json({ error: "KYC kayıt hatası" });
-  }
-});
-
-router.post("/kyc/toggle", async (req, res) => {
-  const { enabled } = req.body;
-  if (typeof enabled !== "boolean") {
-    return res.status(400).json({ error: "enabled (boolean) gerekli" });
-  }
-
-  try {
-    const token = getToken();
-    const tx = await token.setTransferOnlyKYC(enabled);
-    await tx.wait();
-    res.json({ message: `KYC zorunluluğu ${enabled ? "açıldı" : "kapatıldı"}` });
-  } catch (err) {
-    res.status(500).json({ error: "KYC toggle hatası" });
-  }
-});
-
-router.post("/deposit-try", (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount || Number(amount) <= 0) {
-    return res.status(400).json({ error: "userId ve geçerli amount gerekli" });
-  }
-
-  const user = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
-  if (!user) {
-    return res.status(404).json({ error: "Kullanıcı bulunamadı" });
-  }
-
-  db.prepare("UPDATE users SET try_balance = try_balance + ? WHERE id = ?").run(Number(amount), userId);
-  const updated = db.prepare("SELECT try_balance FROM users WHERE id = ?").get(userId);
-
-  res.json({ message: "TRY yüklendi", userId, amount: Number(amount), new_balance: updated.try_balance });
-});
-
-router.get("/users", (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-  const offset = (page - 1) * limit;
-
-  const total = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
-  const users = db.prepare(
-    "SELECT id, username, wallet_address, try_balance, is_admin, created_at FROM users LIMIT ? OFFSET ?"
-  ).all(limit, offset);
-
-  res.json({ users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
-});
-
-router.get("/transactions", (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-  const offset = (page - 1) * limit;
-  const type = req.query.type;
-
-  let whereClause = "";
-  const params = [];
-
-  if (type && (type === "buy" || type === "sell")) {
-    whereClause = "WHERE t.type = ?";
-    params.push(type);
-  }
-
-  const total = db.prepare(`SELECT COUNT(*) as count FROM transactions t ${whereClause}`).get(...params).count;
-  const transactions = db.prepare(
-    `SELECT t.id, t.type, t.token_amount, t.try_amount, t.price, t.tx_hash, t.status, t.created_at, u.username, u.wallet_address
-     FROM transactions t JOIN users u ON t.user_id = u.id ${whereClause}
-     ORDER BY t.created_at DESC LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset);
-
-  res.json({ transactions, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
-});
-
-router.get("/stats", async (req, res) => {
-  try {
-    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
-    const txCount = db.prepare("SELECT COUNT(*) as count FROM transactions WHERE status = 'completed'").get().count;
-    const buyVolume = db.prepare("SELECT COALESCE(SUM(try_amount), 0) as total FROM transactions WHERE type = 'buy' AND status = 'completed'").get().total;
-    const sellVolume = db.prepare("SELECT COALESCE(SUM(try_amount), 0) as total FROM transactions WHERE type = 'sell' AND status = 'completed'").get().total;
-
-    const price = await getPrice();
-    const adminBalance = await getTokenBalance(getAdminAddress());
-
-    res.json({
-      users: userCount,
-      completed_transactions: txCount,
-      buy_volume_try: buyVolume,
-      sell_volume_try: sellVolume,
-      current_price: price.formatted,
-      admin_token_balance: adminBalance.formatted
-    });
-  } catch (err) {
-    res.status(500).json({ error: "İstatistik hatası" });
-  }
-});
-
-export default router;
+import { Router } from "express";import db from "../db.js";import { authMiddleware, adminMiddleware } from "../middleware/auth.js";import { getPrice, getOracle, getToken, getTokenBalance, getAdminAddress } from "../services/blockchain.js";import { ethers } from "ethers";const router = Router();router.use(authMiddleware, adminMiddleware);router.post("/set-price", async (req, res) => {  const { price } = req.body;  if (!price || Number(price) <= 0) {    return res.status(400).json({ error: "Geçerli bir fiyat gerekli" });  }  try {    const oracle = getOracle();    const decimals = Number(process.env.PRICE_DECIMALS);    const priceValue = BigInt(Math.round(Number(price) * 10 ** decimals));    const tx = await oracle.setPrice(priceValue);    await tx.wait();    res.json({ message: "Fiyat güncellendi", price: Number(price) });  } catch (err) {    res.status(500).json({ error: "Fiyat güncelleme hatası" });  }});router.post("/mint", async (req, res) => {  const { address, to, amount } = req.body;  const target = address || to;   if (!target || !amount) {    return res.status(400).json({ error: "address ve amount gerekli" });  }  try {    const token = getToken();    const decimals = Number(process.env.TOKEN_DECIMALS);    const tx = await token.mint(target, ethers.parseUnits(amount.toString(), decimals));    const receipt = await tx.wait();    res.json({ message: "Token basıldı", tx_hash: receipt.hash, to: target, amount });  } catch (err) {    res.status(500).json({ error: "Mint hatası" });  }});router.post("/kyc/register", async (req, res) => {  const { address } = req.body;  if (!address) {    return res.status(400).json({ error: "address gerekli" });  }  try {    const oracle = getOracle();    const isRegistered = await oracle.isWalletRegistered(address);    if (!isRegistered) {      const tx = await oracle.registerWallet(address);      await tx.wait();    }    const existingUser = db.prepare("SELECT id, username FROM users WHERE wallet_address = ?").get(address.toLowerCase());    let dbResult = null;    if (existingUser) {      dbResult = { status: "already_linked", userId: existingUser.id, username: existingUser.username };    } else {      dbResult = { status: "oracle_only", note: "Cüzdan Oracle'a kaydedildi, bir kullanıcıya bağlanmadı" };    }    res.json({ message: "KYC kaydı yapıldı", address, onChain: !isRegistered ? "registered" : "already_registered", db: dbResult });  } catch (err) {    console.error("[KYC]", err);    res.status(500).json({ error: "KYC kayıt hatası" });  }});router.post("/kyc/toggle", async (req, res) => {  const { enabled } = req.body;  if (typeof enabled !== "boolean") {    return res.status(400).json({ error: "enabled (boolean) gerekli" });  }  try {    const token = getToken();    const tx = await token.setTransferOnlyKYC(enabled);    await tx.wait();    res.json({ message: `KYC zorunluluğu ${enabled ? "açıldı" : "kapatıldı"}` });  } catch (err) {    res.status(500).json({ error: "KYC toggle hatası" });  }});router.post("/deposit-try", (req, res) => {  const { userId, username, amount } = req.body;  if ((!userId && !username) || !amount || Number(amount) <= 0) {    return res.status(400).json({ error: "userId veya username ve geçerli amount gerekli" });  }  let user;  if (username) {    user = db.prepare("SELECT id FROM users WHERE username = ?").get(username);  } else {    user = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);  }  if (!user) {    return res.status(404).json({ error: "Kullanıcı bulunamadı" });  }  db.prepare("UPDATE users SET try_balance = try_balance + ? WHERE id = ?").run(Number(amount), user.id);  const updated = db.prepare("SELECT try_balance FROM users WHERE id = ?").get(user.id);  res.json({ message: "TRY yüklendi", userId: user.id, amount: Number(amount), new_balance: updated.try_balance });});router.get("/users", (req, res) => {  const page = Math.max(1, parseInt(req.query.page) || 1);  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));  const offset = (page - 1) * limit;  const total = db.prepare("SELECT COUNT(*) as count FROM users").get().count;  const users = db.prepare(    "SELECT id, username, wallet_address, try_balance, is_admin, created_at FROM users LIMIT ? OFFSET ?"  ).all(limit, offset);  res.json({ users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });});router.get("/transactions", (req, res) => {  const page = Math.max(1, parseInt(req.query.page) || 1);  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));  const offset = (page - 1) * limit;  const type = req.query.type;  let whereClause = "";  const params = [];  if (type && (type === "buy" || type === "sell")) {    whereClause = "WHERE t.type = ?";    params.push(type);  }  const total = db.prepare(`SELECT COUNT(*) as count FROM transactions t ${whereClause}`).get(...params).count;  const transactions = db.prepare(    `SELECT t.id, t.type, t.token_amount, t.try_amount, t.price, t.tx_hash, t.status, t.created_at, u.username, u.wallet_address     FROM transactions t JOIN users u ON t.user_id = u.id ${whereClause}     ORDER BY t.created_at DESC LIMIT ? OFFSET ?`  ).all(...params, limit, offset);  res.json({ transactions, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });});router.get("/stats", async (req, res) => {  try {    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;    const txCount = db.prepare("SELECT COUNT(*) as count FROM transactions WHERE status = 'completed'").get().count;    const buyVolume = db.prepare("SELECT COALESCE(SUM(try_amount), 0) as total FROM transactions WHERE type = 'buy' AND status = 'completed'").get().total;    const sellVolume = db.prepare("SELECT COALESCE(SUM(try_amount), 0) as total FROM transactions WHERE type = 'sell' AND status = 'completed'").get().total;    const price = await getPrice();    const adminBalance = await getTokenBalance(getAdminAddress());    res.json({      totalUsers: userCount,      totalTransactions: txCount,      buy_volume_try: buyVolume,      sell_volume_try: sellVolume,      currentPrice: price.formatted,      adminTokenBalance: adminBalance.formatted    });  } catch (err) {    res.status(500).json({ error: "İstatistik hatası" });  }});export default router;

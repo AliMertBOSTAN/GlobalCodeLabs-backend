@@ -1,55 +1,1 @@
-import { Router } from "express";
-import db from "../db.js";
-import { authMiddleware } from "../middleware/auth.js";
-import { verifySignature, getOracle } from "../services/blockchain.js";
-
-const router = Router();
-
-router.post("/connect", authMiddleware, async (req, res) => {
-  const { address, signature } = req.body;
-  if (!address || !signature) {
-    return res.status(400).json({ error: "address ve signature gerekli" });
-  }
-
-  try {
-    const message = `Cüzdanımı bağlıyorum: ${req.user.id}`;
-    const recovered = verifySignature(message, signature);
-
-    if (recovered.toLowerCase() !== address.toLowerCase()) {
-      return res.status(400).json({ error: "İmza doğrulanamadı" });
-    }
-
-    const existing = db.prepare("SELECT id FROM users WHERE wallet_address = ? AND id != ?").get(address.toLowerCase(), req.user.id);
-    if (existing) {
-      return res.status(409).json({ error: "Bu cüzdan başka bir hesaba bağlı" });
-    }
-
-    db.prepare("UPDATE users SET wallet_address = ? WHERE id = ?").run(address.toLowerCase(), req.user.id);
-
-    const oracle = getOracle();
-    if (oracle) {
-      try {
-        const isRegistered = await oracle.isWalletRegistered(address);
-        if (!isRegistered) {
-          await oracle.registerWallet(address);
-        }
-      } catch {}
-    }
-
-    res.json({ message: "Cüzdan bağlandı", address: address.toLowerCase() });
-  } catch (err) {
-    res.status(500).json({ error: "Cüzdan bağlama hatası" });
-  }
-});
-
-router.delete("/disconnect", authMiddleware, (req, res) => {
-  db.prepare("UPDATE users SET wallet_address = NULL WHERE id = ?").run(req.user.id);
-  res.json({ message: "Cüzdan bağlantısı kesildi" });
-});
-
-router.get("/status", authMiddleware, (req, res) => {
-  const user = db.prepare("SELECT wallet_address FROM users WHERE id = ?").get(req.user.id);
-  res.json({ wallet_address: user?.wallet_address || null });
-});
-
-export default router;
+import { Router } from "express";import db from "../db.js";import { authMiddleware } from "../middleware/auth.js";import { verifySignature, getOracle } from "../services/blockchain.js";const router = Router();router.post("/connect", authMiddleware, async (req, res) => {  const { address, message, signature } = req.body;  if (!address || !signature) {    return res.status(400).json({ error: "address ve signature gerekli" });  }  try {    const standardMessage = `Cuzdanimi bagliyorum: ${req.user.id}`;    const verifyMsg = message || standardMessage;    const recovered = verifySignature(verifyMsg, signature);    if (recovered.toLowerCase() !== address.toLowerCase()) {      return res.status(400).json({ error: "İmza doğrulanamadı" });    }    const existing = db.prepare("SELECT id FROM users WHERE wallet_address = ? AND id != ?").get(address.toLowerCase(), req.user.id);    if (existing) {      return res.status(409).json({ error: "Bu cüzdan başka bir hesaba bağlı" });    }    db.prepare("UPDATE users SET wallet_address = ? WHERE id = ?").run(address.toLowerCase(), req.user.id);    const oracle = getOracle();    if (oracle) {      try {        const isRegistered = await oracle.isWalletRegistered(address);        if (!isRegistered) {          await oracle.registerWallet(address);        }      } catch {}    }    res.json({ message: "Cüzdan bağlandı", address: address.toLowerCase() });  } catch (err) {    res.status(500).json({ error: "Cüzdan bağlama hatası" });  }});router.delete("/disconnect", authMiddleware, (req, res) => {  db.prepare("UPDATE users SET wallet_address = NULL WHERE id = ?").run(req.user.id);  res.json({ message: "Cüzdan bağlantısı kesildi" });});router.get("/status", authMiddleware, (req, res) => {  const user = db.prepare("SELECT wallet_address FROM users WHERE id = ?").get(req.user.id);  res.json({ wallet_address: user?.wallet_address || null });});export default router;
